@@ -1,0 +1,39 @@
+{
+  "name": "Jarvis Dev Mode",
+  "description": "Apre l'ambiente di sviluppo completo",
+  "steps": [
+    {
+      "action": "notify_user",
+      "msg": "Jarvis sta preparando il tuo ambiente..."
+    },
+    {
+      "action": "open_app",
+      "target": "D:\\vs_code\\Microsoft VS Code\\Code.exe"
+    },
+    {
+      "action": "wait_for_window",
+      "target": "Visual Studio Code",
+      "timeout": 20
+    },
+    {
+      "action": "open_app",
+      "target": "C:\\Users\\Amministratore\\AppData\\Local\\Programs\\Opera\\opera.exe"
+    },
+    {
+      "action": "open_app",
+      "target": "C:\\Users\\Amministratore\\AppData\\Local\\Discord\\app-1.0.9238\\Discord.exe"
+    },
+    {
+      "action": "sleep",
+      "target": "3"
+    },
+    {
+      "action": "focus_window",
+      "target": "Visual Studio Code"
+    },
+    {
+      "action": "notify_user",
+      "msg": "Dev mode attivo — buon lavoro!"
+    }
+  ]
+}
