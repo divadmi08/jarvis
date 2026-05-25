@@ -1,58 +1,44 @@
+from datetime import datetime
 import time
-import win32gui
-import win32process
-import psutil
-
-from data.database import get_connection
-
+from utils.window_utils import get_active_window
 
 class Observer:
+    def __init__(self, db):
+        self.db = db
+        self.current_app = None
+        self.current_title = None
+        self.last_switch_time = None
 
     def observe(self):
+        while True:
+            try:
+                app, title = get_active_window()
+                now = datetime.now()
 
-        hwnd = win32gui.GetForegroundWindow()
+                if self.current_app is None:
+                    self.current_app = app
+                    self.current_title = title
+                    self.last_switch_time = now
 
-        window_title = win32gui.GetWindowText(hwnd)
+                elif app != self.current_app or title != self.current_title:
 
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    duration = (now - self.last_switch_time).total_seconds()
 
-        try:
-            process = psutil.Process(pid)
-            app_name = process.name()
+                    if duration > 0:
+                        self.db.save_activity(
+                            self.current_app,
+                            self.current_title,
+                            self.last_switch_time.isoformat(),
+                            now.isoformat(),
+                            duration
+                        )
 
-        except Exception:
-            app_name = "Unknown"
+                    self.current_app = app
+                    self.current_title = title
+                    self.last_switch_time = now
 
-        self.save_activity(
-            app_name,
-            window_title
-        )
+                time.sleep(2)
 
-        print(f"{app_name} | {window_title}")
-
-    def save_activity(
-        self,
-        app_name,
-        window_title
-    ):
-
-        conn = get_connection()
-
-        cursor = conn.cursor()
-
-        cursor.execute("""
-        INSERT INTO activity_log
-        (
-            app_name,
-            window_title,
-            duration_sec
-        )
-        VALUES (?, ?, ?)
-        """, (
-            app_name,
-            window_title,
-            5
-        ))
-
-        conn.commit()
-        conn.close()
+            except Exception as e:
+                print("Observer error:", e)
+                time.sleep(2)
