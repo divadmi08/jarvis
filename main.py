@@ -48,8 +48,7 @@ def run_scheduler():
         try:
             log.info("── Scheduler: avvio session builder ──")
             sb = SessionBuilder()
-            sessions = sb.build_sessions()
-            saved = sb.save_sessions(sessions)
+            saved = sb.sync_sessions_incremental()
             log.info(f"── Scheduler: {saved} sessioni salvate ──")
 
             log.info("── Scheduler: avvio pattern engine ──")

@@ -24,6 +24,7 @@ GAP_MINUTES = 10          # gap inattività → nuova sessione
 MIN_APP_DURATION = 15     # secondi minimi per considerare un'app (filtra click accidentali)
 MIN_SESSION_DURATION = 60 # secondi minimi per salvare una sessione (filtra sessioni fantasma)
 MIN_APP_SHARE = 0.02      # % minima del tempo sessione per considerare un'app (filtra rumore)
+SESSION_BUILDER_STATE_KEY = "session_builder:last_processed_activity_end"
 
 # ── Mappa categoria → processi riconosciuti ───────────────────────────────────
 # Ordine: più specifico prima. Match su sottostringa lowercase del nome processo.
@@ -125,17 +126,25 @@ class SessionBuilder:
 
     # ── Load ──────────────────────────────────────────────────────────────────
 
-    def load_logs(self) -> list[tuple]:
-        self.cursor.execute("""
-            SELECT app_name, window_title, start_time, end_time, duration
-            FROM activity_log
-            ORDER BY start_time
-        """)
+    def load_logs(self, since: datetime | None = None) -> list[tuple]:
+        if since is None:
+            self.cursor.execute("""
+                SELECT app_name, window_title, start_time, end_time, duration
+                FROM activity_log
+                ORDER BY start_time
+            """)
+        else:
+            self.cursor.execute("""
+                SELECT app_name, window_title, start_time, end_time, duration
+                FROM activity_log
+                WHERE start_time >= ?
+                ORDER BY start_time
+            """, (since.isoformat(),))
         return self.cursor.fetchall()
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
-    def build_sessions(self) -> list[dict]:
+    def build_sessions(self, since: datetime | None = None) -> list[dict]:
         """
         Raggruppa i log in sessioni.
         Ogni sessione contiene:
@@ -143,7 +152,7 @@ class SessionBuilder:
         - apps: {app_name: seconds}         → usato per calcoli interni
         - categories: {category: seconds}   → distribuzione per focus
         """
-        logs = self.load_logs()
+        logs = self.load_logs(since=since)
         sessions: list[dict] = []
         current: dict | None = None
 
@@ -184,6 +193,41 @@ class SessionBuilder:
                 sessions.append(finalized)
 
         return sessions
+
+    def _latest_saved_session_start(self) -> datetime | None:
+        self.cursor.execute("""
+            SELECT start_time
+            FROM sessions
+            ORDER BY start_time DESC
+            LIMIT 1
+        """)
+        row = self.cursor.fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
+
+    def _latest_activity_end(self) -> datetime | None:
+        self.cursor.execute("SELECT MAX(end_time) FROM activity_log")
+        row = self.cursor.fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
+
+    def _processed_until(self) -> datetime | None:
+        value = self.db.get_state(SESSION_BUILDER_STATE_KEY)
+        return datetime.fromisoformat(value) if value else None
+
+    def _set_processed_until(self, value: datetime) -> None:
+        self.db.set_state(SESSION_BUILDER_STATE_KEY, value.isoformat())
+
+    def _determine_rebuild_start(self) -> tuple[datetime | None, datetime | None]:
+        latest_activity_end = self._latest_activity_end()
+        if latest_activity_end is None:
+            return None, None
+
+        processed_until = self._processed_until()
+        if processed_until is None:
+            return None, latest_activity_end
+        if processed_until is not None and processed_until >= latest_activity_end:
+            return None, latest_activity_end
+
+        return self._latest_saved_session_start(), latest_activity_end
 
     # ── Finalize ──────────────────────────────────────────────────────────────
 
@@ -242,17 +286,27 @@ class SessionBuilder:
 
     # ── Save ──────────────────────────────────────────────────────────────────
 
-    def save_sessions(self, sessions: list[dict]) -> int:
+    def save_sessions(
+        self,
+        sessions: list[dict],
+        replace_from: datetime | None = None,
+        processed_until: datetime | None = None,
+    ) -> int:
         """
-        Rigenera la tabella sessions a partire dai log raw.
+        Salva le sessioni derivate dai log raw.
 
-        Le sessioni sono dati derivati: se facciamo append a ogni avvio/scheduler
-        finiamo per duplicare le stesse righe o conservare versioni vecchie di
-        sessioni ancora in corso.
+        Se `replace_from` è None fa un rebuild completo.
+        Altrimenti rimpiazza solo la coda di sessioni a partire da quella data.
         """
         import json
 
-        self.cursor.execute("DELETE FROM sessions")
+        if replace_from is None:
+            self.cursor.execute("DELETE FROM sessions")
+        else:
+            self.cursor.execute(
+                "DELETE FROM sessions WHERE start_time >= ?",
+                (replace_from.isoformat(),),
+            )
 
         saved = 0
         for s in sessions:
@@ -272,7 +326,33 @@ class SessionBuilder:
             saved += 1
 
         self.db.conn.commit()
+        if processed_until is not None:
+            self._set_processed_until(processed_until)
         return saved
+
+    def sync_sessions_incremental(self) -> int:
+        """
+        Aggiorna `sessions` senza rigenerare l'intera tabella.
+
+        Strategia:
+        - se non ci sono nuovi log dall'ultimo run, non fa nulla
+        - se ci sono nuovi log, ricalcola solo dalla sessione più recente salvata
+          fino alla fine dei log, così può estendere o spezzare correttamente la coda
+        """
+        rebuild_from, latest_activity_end = self._determine_rebuild_start()
+        if latest_activity_end is None:
+            return 0
+
+        processed_until = self._processed_until()
+        if processed_until is not None and processed_until >= latest_activity_end:
+            return 0
+
+        sessions = self.build_sessions(since=rebuild_from)
+        return self.save_sessions(
+            sessions,
+            replace_from=rebuild_from,
+            processed_until=latest_activity_end,
+        )
 
     # ── Debug print ───────────────────────────────────────────────────────────
 

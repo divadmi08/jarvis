@@ -51,8 +51,8 @@ ACTION_LEVELS: dict[str, Level] = {
     "wait_for_window": Level.SAFE,
     "notify_user":     Level.SAFE,
     "sleep":           Level.SAFE,
-    "type_text":       Level.SAFE,
-    "click":           Level.SAFE,
+    "type_text":       Level.MEDIUM,
+    "click":           Level.MEDIUM,
 
     # ── MEDIUM ────────────────────────────────────────────────────────────────
     "run_command":     Level.MEDIUM,   # dipende dal comando, ma meglio cauti
@@ -73,6 +73,22 @@ ACTION_LEVELS: dict[str, Level] = {
 
 # Livello di default per azioni non in mappa
 DEFAULT_LEVEL = Level.MEDIUM
+
+RISKY_COMMAND_MARKERS = (
+    " del ",
+    " rd ",
+    " rmdir ",
+    " format ",
+    " reg delete ",
+    " remove-item ",
+    " clear-content ",
+    " stop-process ",
+    " taskkill ",
+    " shutdown ",
+    " restart-computer ",
+    " set-itemproperty ",
+)
+RISKY_OPEN_EXTENSIONS = {".bat", ".cmd", ".ps1", ".vbs", ".js"}
 
 
 # ── Risultato check ───────────────────────────────────────────────────────────
@@ -131,7 +147,26 @@ class PermissionSystem:
 
     # ── Livello ───────────────────────────────────────────────────────────────
 
-    def get_level(self, action: str) -> Level:
+    @staticmethod
+    def _is_url(target: str) -> bool:
+        lowered = target.strip().lower()
+        return lowered.startswith("http://") or lowered.startswith("https://")
+
+    @staticmethod
+    def _is_risky_command(target: str) -> bool:
+        normalized = f" {target.strip().lower()} "
+        return any(marker in normalized for marker in RISKY_COMMAND_MARKERS)
+
+    @staticmethod
+    def _is_risky_open_target(target: str) -> bool:
+        lowered = target.strip().lower()
+        return any(lowered.endswith(ext) for ext in RISKY_OPEN_EXTENSIONS)
+
+    def get_level(self, action: str, target: str = "") -> Level:
+        if action == "run_command" and self._is_risky_command(target):
+            return Level.RISKY
+        if action == "open_app" and (self._is_url(target) or self._is_risky_open_target(target)):
+            return Level.MEDIUM
         return ACTION_LEVELS.get(action, DEFAULT_LEVEL)
 
     # ── Conferma utente ───────────────────────────────────────────────────────
@@ -188,7 +223,7 @@ class PermissionSystem:
 
         Returns PermissionResult con .granted = True/False
         """
-        level = self.get_level(action)
+        level = self.get_level(action, target)
 
         # ── SAFE: via libera ──────────────────────────────────────────────────
         if level == Level.SAFE:

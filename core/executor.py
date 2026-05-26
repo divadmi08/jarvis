@@ -29,6 +29,7 @@ Formato routine JSON:
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -161,6 +162,36 @@ def _bring_to_front(hwnd: int) -> bool:
         return False
 
 
+def _contains_shell_metacharacters(command: str) -> bool:
+    return any(token in command for token in ("&&", "||", "|", ">", "<", ";"))
+
+
+def _split_command(command: str) -> list[str]:
+    try:
+        return shlex.split(command, posix=False)
+    except ValueError:
+        return []
+
+
+def _normalize_argv(command: str) -> list[str]:
+    stripped = command.strip()
+    if not stripped:
+        return []
+
+    unquoted = stripped.strip('"')
+    if os.path.exists(unquoted):
+        return [unquoted]
+
+    argv = _split_command(stripped)
+    if not argv:
+        return []
+
+    executable = argv[0].strip('"')
+    if os.path.exists(executable):
+        argv[0] = executable
+    return argv
+
+
 # ── Azioni atomiche ───────────────────────────────────────────────────────────
 
 def action_open_app(target: str, **kwargs) -> StepResult:
@@ -175,8 +206,15 @@ def action_open_app(target: str, **kwargs) -> StepResult:
             import webbrowser
             webbrowser.open(target)
         else:
+            if _contains_shell_metacharacters(target):
+                raise ValueError("Target contiene operatori shell non consentiti")
+
+            argv = _normalize_argv(target)
+            if not argv:
+                raise ValueError("Target applicazione non valido o non parsabile")
+
             # Estrai il nome del processo dal path (es. "Code.exe")
-            proc_name = os.path.basename(target.split()[0])
+            proc_name = os.path.basename(argv[0])
 
             # Controlla se è già in esecuzione
             already_running = any(
@@ -199,9 +237,7 @@ def action_open_app(target: str, **kwargs) -> StepResult:
                     )
 
             # Non in esecuzione — avvia normalmente
-            # Wrappa tra virgolette se il path contiene spazi
-            launch = f'"{target}"' if ' ' in target and not target.startswith('"') else target
-            subprocess.Popen(launch, shell=True)
+            subprocess.Popen(argv, shell=False)
             time.sleep(OPEN_APP_WAIT)
 
         return StepResult(
@@ -267,15 +303,36 @@ def action_wait_for_window(target: str, timeout: int = DEFAULT_TIMEOUT, **kwargs
     )
 
 
-def action_run_command(target: str, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> StepResult:
+def action_run_command(
+    target: str,
+    timeout: int = DEFAULT_TIMEOUT,
+    args: list[str] | None = None,
+    use_shell: bool = False,
+    **kwargs,
+) -> StepResult:
     """
     Esegue un comando shell con timeout.
     Output viene loggato ma non bloccante.
     """
     t0 = time.time()
     try:
+        if args:
+            command = list(args)
+            shell = False
+        elif use_shell:
+            command = target
+            shell = True
+        else:
+            if _contains_shell_metacharacters(target):
+                raise ValueError("Operatori shell rilevati: usa 'use_shell': true per consentirli esplicitamente")
+            command = _normalize_argv(target)
+            if not command:
+                raise ValueError("Comando non valido o vuoto")
+            shell = False
+
         result = subprocess.run(
-            target, shell=True,
+            command,
+            shell=shell,
             capture_output=True, text=True,
             timeout=timeout,
         )
