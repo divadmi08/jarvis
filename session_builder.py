@@ -243,8 +243,16 @@ class SessionBuilder:
     # ── Save ──────────────────────────────────────────────────────────────────
 
     def save_sessions(self, sessions: list[dict]) -> int:
-        """Salva le sessioni nel DB. Restituisce il numero di sessioni salvate."""
+        """
+        Rigenera la tabella sessions a partire dai log raw.
+
+        Le sessioni sono dati derivati: se facciamo append a ogni avvio/scheduler
+        finiamo per duplicare le stesse righe o conservare versioni vecchie di
+        sessioni ancora in corso.
+        """
         import json
+
+        self.cursor.execute("DELETE FROM sessions")
 
         saved = 0
         for s in sessions:

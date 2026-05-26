@@ -44,6 +44,9 @@ import win32process
 import psutil
 import pyautogui
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from system.permissions import PermissionSystem
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -410,6 +413,7 @@ class Executor:
     def __init__(self):
         # Blocca pyautogui se il mouse va in alto a sinistra (failsafe)
         pyautogui.FAILSAFE = True
+        self.permissions = PermissionSystem()
 
     def run_routine(self, routine: dict, on_step: callable = None) -> RoutineResult:
         """
@@ -441,6 +445,20 @@ class Executor:
                 )
                 result.steps.append(sr)
                 log.warning(f"  [{i+1}/{len(steps)}] {action} — AZIONE SCONOSCIUTA")
+                if on_step:
+                    on_step(i, step, sr)
+                continue
+
+            # Controlla permessi prima di eseguire
+            perm = self.permissions.check(action, target)
+            if not perm.granted:
+                sr = StepResult(
+                    action=action, target=target,
+                    status=StepStatus.SKIPPED,
+                    message=f"Permesso negato — {perm.reason}",
+                )
+                result.steps.append(sr)
+                log.warning(f"  [{i+1}/{len(steps)}] {action} — PERMESSO NEGATO")
                 if on_step:
                     on_step(i, step, sr)
                 continue
