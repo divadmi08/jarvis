@@ -1,5 +1,7 @@
 import sqlite3
 from pathlib import Path
+from typing import Any
+
 
 class Database:
     def __init__(self, db_path="data/jarvis.db"):
@@ -63,6 +65,23 @@ class Database:
         )
         """)
 
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS routine_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            steps_json TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            reasoning TEXT NOT NULL,
+            source_pattern_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(pattern_id) REFERENCES patterns(id)
+        )
+        """)
+
         existing_pattern_columns = {
             row[1]
             for row in self.cursor.execute("PRAGMA table_info(patterns)").fetchall()
@@ -80,6 +99,7 @@ class Database:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_type_score ON patterns(pattern_type, score DESC)")
         self.cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_identity ON patterns(pattern_type, apps_sequence)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_routine_proposals_pattern_status ON routine_proposals(pattern_id, status)")
 
         self.conn.commit()
 
@@ -134,3 +154,119 @@ class Database:
             (key, value),
         )
         self.conn.commit()
+
+    def get_pattern_by_id(self, pattern_id: int) -> tuple[Any, ...] | None:
+        self.cursor.execute(
+            """
+            SELECT id, pattern_type, apps_sequence, occurrences, first_seen, last_seen,
+                   metadata, proposed, accepted, score, semantic_intent, pattern_version
+            FROM patterns
+            WHERE id = ?
+            """,
+            (pattern_id,),
+        )
+        return self.cursor.fetchone()
+
+    def fetch_candidate_patterns(
+        self,
+        limit: int = 10,
+        allowed_types: tuple[str, ...] = ("cooccurrence", "sequence"),
+        min_score: float = 0.3,
+    ) -> list[tuple[Any, ...]]:
+        placeholders = ",".join("?" for _ in allowed_types)
+        params: list[Any] = [*allowed_types, min_score, limit]
+        self.cursor.execute(
+            f"""
+            SELECT p.id, p.pattern_type, p.apps_sequence, p.occurrences, p.first_seen, p.last_seen,
+                   p.metadata, p.proposed, p.accepted, p.score, p.semantic_intent, p.pattern_version
+            FROM patterns p
+            WHERE p.pattern_type IN ({placeholders})
+              AND p.accepted = 0
+              AND COALESCE(p.score, 0) >= ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM routine_proposals rp
+                  WHERE rp.pattern_id = p.id
+                    AND rp.status IN ('pending', 'accepted')
+              )
+            ORDER BY COALESCE(p.score, 0) DESC, p.occurrences DESC, p.last_seen DESC
+            LIMIT ?
+            """,
+            params,
+        )
+        return self.cursor.fetchall()
+
+    def has_active_routine_proposal(self, pattern_id: int) -> bool:
+        self.cursor.execute(
+            """
+            SELECT 1
+            FROM routine_proposals
+            WHERE pattern_id = ?
+              AND status IN ('pending', 'accepted')
+            LIMIT 1
+            """,
+            (pattern_id,),
+        )
+        return self.cursor.fetchone() is not None
+
+    def save_routine_proposal(
+        self,
+        pattern_id: int,
+        name: str,
+        description: str,
+        steps_json: str,
+        confidence: float,
+        reasoning: str,
+        source_pattern_json: str,
+        status: str = "pending",
+    ) -> int:
+        self.cursor.execute(
+            """
+            INSERT INTO routine_proposals
+            (pattern_id, name, description, steps_json, confidence, reasoning, source_pattern_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                pattern_id,
+                name,
+                description,
+                steps_json,
+                confidence,
+                reasoning,
+                source_pattern_json,
+                status,
+            ),
+        )
+        self.cursor.execute(
+            """
+            UPDATE patterns
+            SET proposed = 1
+            WHERE id = ?
+            """,
+            (pattern_id,),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
+
+    def fetch_routine_proposals(self, pattern_id: int | None = None) -> list[tuple[Any, ...]]:
+        if pattern_id is None:
+            self.cursor.execute(
+                """
+                SELECT id, pattern_id, name, description, steps_json, confidence, reasoning,
+                       source_pattern_json, status, created_at, updated_at
+                FROM routine_proposals
+                ORDER BY created_at DESC, id DESC
+                """
+            )
+            return self.cursor.fetchall()
+        self.cursor.execute(
+            """
+            SELECT id, pattern_id, name, description, steps_json, confidence, reasoning,
+                   source_pattern_json, status, created_at, updated_at
+            FROM routine_proposals
+            WHERE pattern_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (pattern_id,),
+        )
+        return self.cursor.fetchall()
