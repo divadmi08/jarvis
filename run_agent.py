@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 from core.agent_loop import AgentLoop
-from core.ai_client import AIClientConfigurationError, GeminiAIClient
+from core.ai_client import AIClientConfigurationError, build_ai_client
 from core.planner import LLMPlanner
 from data.database import Database
 
@@ -13,7 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one bounded Jarvis agent step for a user goal.")
     parser.add_argument("goal", help="Goal for Jarvis to plan and execute.")
     parser.add_argument("--db-path", default="data/jarvis.db", help="Path to the SQLite database.")
-    parser.add_argument("--model", default="gemini-2.5-flash-lite", help="Gemini model name to use.")
+    parser.add_argument("--provider", default=None, choices=["gemini", "groq"], help="AI provider da usare (default: auto)")
+    parser.add_argument("--model", default=None, help="Nome del modello (default: auto in base al provider).")
     parser.add_argument("--max-plan-steps", type=int, default=5, help="Maximum steps the planner may return.")
     parser.add_argument("--log-level", default="INFO", help="Logging level.")
     return parser
@@ -28,7 +33,7 @@ def main() -> int:
 
     db = Database(args.db_path)
     try:
-        ai_client = GeminiAIClient(model=args.model)
+        ai_client = build_ai_client(provider=args.provider, model=args.model)
     except AIClientConfigurationError as exc:
         print(f"Configuration error: {exc}")
         db.conn.close()
