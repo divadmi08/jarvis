@@ -9,6 +9,19 @@ from core.routine_proposer import RoutineProposer
 from data.database import Database
 
 
+def build_context_builder(db: Database):
+    try:
+        from core.context_builder import ContextBuilder
+        from core.embedding_client import LocalEmbeddingClient
+        from core.semantic_memory import SemanticMemory
+
+        memory = SemanticMemory(LocalEmbeddingClient())
+        return ContextBuilder(memory=memory, db=db)
+    except Exception as exc:
+        logging.getLogger("propose_routines").warning("Semantic context unavailable: %s", exc)
+        return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate safe routine proposals from mined patterns.")
     parser.add_argument("--db-path", default="data/jarvis.db", help="Path to the SQLite database.")
@@ -56,7 +69,7 @@ def main() -> int:
         db.conn.close()
         return 2
 
-    proposer = RoutineProposer(db=db, ai_client=ai_client)
+    proposer = RoutineProposer(db=db, ai_client=ai_client, context_builder=build_context_builder(db))
     service = RoutineProposalService(db=db, proposer=proposer)
 
     try:

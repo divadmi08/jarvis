@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from collections import defaultdict
@@ -17,6 +18,7 @@ from data.database import Database
 from session_builder import MIN_APP_DURATION, categorize_app, is_noise
 
 from core.intent_inference import IntentInferenceEngine
+from core.memory_consolidator import MemoryConsolidator
 from core.pattern_compression import PatternCompressor
 from core.pattern_scoring import PatternScorer
 from core.pattern_similarity import PatternSimilarity
@@ -25,10 +27,28 @@ from core.temporal_model import TemporalDecayConfig, TemporalModel
 from core.workflow_embedding import build_workflow_embedding
 
 
+log = logging.getLogger("pattern_engine")
+
+
 class PatternEngine:
-    def __init__(self, db_path: str = "data/jarvis.db", config: PatternEngineConfig | None = None):
+    def __init__(
+        self,
+        db_path: str = "data/jarvis.db",
+        config: PatternEngineConfig | None = None,
+        semantic_memory: Any | None = None,
+        memory_consolidator: MemoryConsolidator | None = None,
+        llm_intent_recognizer: Any | None = None,
+        llm_intent_threshold: float = 0.62,
+        llm_intent_max_calls: int = 3,
+    ):
         self.db = Database(db_path)
         self.cursor = self.db.cursor
+        self.semantic_memory = semantic_memory
+        self.memory_consolidator = memory_consolidator or MemoryConsolidator(self.db, semantic_memory)
+        self.llm_intent_recognizer = llm_intent_recognizer
+        self.llm_intent_threshold = llm_intent_threshold
+        self.llm_intent_max_calls = max(0, int(llm_intent_max_calls))
+        self._llm_intent_calls = 0
         self.config = config or PatternEngineConfig(min_meaningful_duration_seconds=MIN_APP_DURATION)
         self.temporal_model = TemporalModel(
             TemporalDecayConfig(
@@ -185,15 +205,20 @@ class PatternEngine:
         return "\n".join(lines)
 
     def run(self) -> dict[str, list[dict[str, Any]]]:
+        self._llm_intent_calls = 0
         raw_sessions = self.load_sessions()
         print(f"Sessioni caricate: {len(raw_sessions)}")
         if not raw_sessions:
             print("Nessuna sessione trovata. Esegui prima session_builder.py")
             return {}
         represented = self._represent_sessions(raw_sessions)
-        cooccurrence = [pattern.to_legacy_dict() for pattern in self._build_cooccurrence_patterns(represented)]
-        temporal = [pattern.to_legacy_dict() for pattern in self._build_temporal_patterns(represented)]
-        sequence = [pattern.to_legacy_dict() for pattern in self._build_sequence_patterns(represented)]
+        cooccurrence_patterns = self._build_cooccurrence_patterns(represented)
+        temporal_patterns = self._build_temporal_patterns(represented)
+        sequence_patterns = self._build_sequence_patterns(represented)
+        self._store_semantic_memory(represented, cooccurrence_patterns + temporal_patterns + sequence_patterns)
+        cooccurrence = [pattern.to_legacy_dict() for pattern in cooccurrence_patterns]
+        temporal = [pattern.to_legacy_dict() for pattern in temporal_patterns]
+        sequence = [pattern.to_legacy_dict() for pattern in sequence_patterns]
         all_patterns = cooccurrence + temporal + sequence
         print(f"Totale pattern candidati: {len(all_patterns)}")
         self.save_patterns(all_patterns)
@@ -422,7 +447,7 @@ class PatternEngine:
     ) -> WorkflowPattern:
         matches = sorted(matching_sessions, key=lambda session: session.start)
         score = self.pattern_scorer.score_pattern(matches, all_sessions, apps)
-        intent = self.intent_engine.infer(apps, temporal_context)
+        intent = self._infer_intent(apps, temporal_context)
         recency = self.temporal_model.decay_weight(matches[-1].end) if matches else 0.0
         workflow_metadata = dict(metadata or {})
         workflow_metadata["embedding"] = build_workflow_embedding({app: matches[-1].app_weights.get(app, 0.0) for app in apps})
@@ -442,10 +467,52 @@ class PatternEngine:
             metadata=workflow_metadata,
         )
 
+    def _infer_intent(self, apps: tuple[str, ...], temporal_context: Any) -> Any:
+        rule_intent = self.intent_engine.infer(apps, temporal_context)
+        if (
+            self.llm_intent_recognizer is None
+            or (rule_intent is not None and rule_intent.confidence >= self.llm_intent_threshold)
+        ):
+            return rule_intent
+        if self._llm_intent_calls >= self.llm_intent_max_calls:
+            return rule_intent
+
+        self._llm_intent_calls += 1
+        try:
+            llm_intent = self.llm_intent_recognizer.infer(apps, temporal_context)
+        except Exception as exc:
+            log.warning("LLM intent fallback failed for %s: %s", apps, exc)
+            return rule_intent
+
+        if llm_intent is None:
+            return rule_intent
+        self.db.save_intent_prediction(
+            pattern_id=None,
+            intent=llm_intent.intent,
+            confidence=llm_intent.confidence,
+            reasoning=str(llm_intent.context.get("reasoning", "")),
+        )
+        if rule_intent is None or llm_intent.confidence >= rule_intent.confidence:
+            return llm_intent
+        return rule_intent
+
     def _rank_and_compress(self, patterns: list[WorkflowPattern]) -> list[WorkflowPattern]:
         strong_patterns = [pattern for pattern in patterns if pattern.score.final_score > 0.18 and pattern.frequency >= 2]
         compressed = self.compressor.compress(strong_patterns)
         return sorted(compressed, key=lambda pattern: pattern.score.final_score, reverse=True)[: self.config.max_patterns_per_type]
+
+    def _store_semantic_memory(
+        self,
+        sessions: list[SessionRepresentation],
+        patterns: list[WorkflowPattern],
+    ) -> None:
+        if self.semantic_memory is None:
+            self.memory_consolidator.consolidate(sessions, patterns)
+            return
+        try:
+            self.memory_consolidator.consolidate(sessions, patterns)
+        except Exception as exc:
+            log.warning("Memory consolidation failed: %s", exc)
 
     @staticmethod
     def _parse_apps_used(apps_used: str) -> list[str]:

@@ -82,6 +82,53 @@ class Database:
         )
         """)
 
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS memory_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            source_id TEXT,
+            summary TEXT NOT NULL,
+            metadata_json TEXT,
+            importance REAL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reflections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT NOT NULL,
+            insight TEXT NOT NULL,
+            confidence REAL DEFAULT 0,
+            evidence_json TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS intent_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_id INTEGER,
+            intent TEXT NOT NULL,
+            confidence REAL DEFAULT 0,
+            reasoning TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(pattern_id) REFERENCES patterns(id)
+        )
+        """)
+
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            plan_json TEXT,
+            result_json TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
         existing_pattern_columns = {
             row[1]
             for row in self.cursor.execute("PRAGMA table_info(patterns)").fetchall()
@@ -100,6 +147,30 @@ class Database:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_type_score ON patterns(pattern_type, score DESC)")
         self.cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_identity ON patterns(pattern_type, apps_sequence)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_routine_proposals_pattern_status ON routine_proposals(pattern_id, status)")
+        self.cursor.execute("""
+            DELETE FROM memory_events
+            WHERE source_id IS NOT NULL
+              AND id NOT IN (
+                  SELECT MAX(id)
+                  FROM memory_events
+                  WHERE source_id IS NOT NULL
+                  GROUP BY event_type, source_id
+              )
+        """)
+        self.cursor.execute("""
+            DELETE FROM reflections
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM reflections
+                GROUP BY topic, insight
+            )
+        """)
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_type_created ON memory_events(event_type, created_at DESC)")
+        self.cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_events_identity ON memory_events(event_type, source_id)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_reflections_topic_created ON reflections(topic, created_at DESC)")
+        self.cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reflections_identity ON reflections(topic, insight)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_intent_predictions_pattern ON intent_predictions(pattern_id, created_at DESC)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_created ON agent_tasks(status, created_at DESC)")
 
         self.conn.commit()
 
@@ -268,5 +339,149 @@ class Database:
             ORDER BY created_at DESC, id DESC
             """,
             (pattern_id,),
+        )
+        return self.cursor.fetchall()
+
+    def save_memory_event(
+        self,
+        event_type: str,
+        source_id: str | None,
+        summary: str,
+        metadata_json: str,
+        importance: float = 0.0,
+    ) -> int:
+        self.cursor.execute(
+            """
+            INSERT INTO memory_events (event_type, source_id, summary, metadata_json, importance)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(event_type, source_id) DO UPDATE SET
+                summary = excluded.summary,
+                metadata_json = excluded.metadata_json,
+                importance = excluded.importance
+            """,
+            (event_type, source_id, summary, metadata_json, float(importance)),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
+
+    def fetch_memory_events(self, limit: int = 50, event_type: str | None = None) -> list[tuple[Any, ...]]:
+        if event_type is None:
+            self.cursor.execute(
+                """
+                SELECT id, event_type, source_id, summary, metadata_json, importance, created_at
+                FROM memory_events
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return self.cursor.fetchall()
+        self.cursor.execute(
+            """
+            SELECT id, event_type, source_id, summary, metadata_json, importance, created_at
+            FROM memory_events
+            WHERE event_type = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (event_type, limit),
+        )
+        return self.cursor.fetchall()
+
+    def save_reflection(
+        self,
+        topic: str,
+        insight: str,
+        confidence: float,
+        evidence_json: str,
+    ) -> int:
+        self.cursor.execute(
+            """
+            INSERT INTO reflections (topic, insight, confidence, evidence_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(topic, insight) DO UPDATE SET
+                confidence = excluded.confidence,
+                evidence_json = excluded.evidence_json
+            """,
+            (topic, insight, float(confidence), evidence_json),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
+
+    def fetch_reflections(self, limit: int = 20) -> list[tuple[Any, ...]]:
+        self.cursor.execute(
+            """
+            SELECT id, topic, insight, confidence, evidence_json, created_at
+            FROM reflections
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return self.cursor.fetchall()
+
+    def save_intent_prediction(
+        self,
+        pattern_id: int | None,
+        intent: str,
+        confidence: float,
+        reasoning: str,
+    ) -> int:
+        self.cursor.execute(
+            """
+            INSERT INTO intent_predictions (pattern_id, intent, confidence, reasoning)
+            VALUES (?, ?, ?, ?)
+            """,
+            (pattern_id, intent, float(confidence), reasoning),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
+
+    def create_agent_task(
+        self,
+        goal: str,
+        status: str = "planned",
+        plan_json: str | None = None,
+        result_json: str | None = None,
+    ) -> int:
+        self.cursor.execute(
+            """
+            INSERT INTO agent_tasks (goal, status, plan_json, result_json, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (goal, status, plan_json, result_json),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
+
+    def update_agent_task(
+        self,
+        task_id: int,
+        status: str,
+        plan_json: str | None = None,
+        result_json: str | None = None,
+    ) -> None:
+        self.cursor.execute(
+            """
+            UPDATE agent_tasks
+            SET status = ?,
+                plan_json = COALESCE(?, plan_json),
+                result_json = COALESCE(?, result_json),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status, plan_json, result_json, task_id),
+        )
+        self.conn.commit()
+
+    def fetch_agent_tasks(self, limit: int = 20) -> list[tuple[Any, ...]]:
+        self.cursor.execute(
+            """
+            SELECT id, goal, status, plan_json, result_json, created_at, updated_at
+            FROM agent_tasks
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
         )
         return self.cursor.fetchall()

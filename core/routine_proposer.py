@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from core.ai_client import AIClient
 from core.app_registry import app_target_for, normalize_app_name
@@ -18,6 +18,11 @@ from data.database import Database
 
 
 log = logging.getLogger("routine_proposer")
+
+
+class PatternContextBuilder(Protocol):
+    def build_for_pattern(self, pattern: "CandidatePattern") -> Any:
+        ...
 
 
 @dataclass(frozen=True)
@@ -50,9 +55,15 @@ class ProposalAttemptResult:
 
 
 class RoutineProposer:
-    def __init__(self, db: Database, ai_client: AIClient) -> None:
+    def __init__(
+        self,
+        db: Database,
+        ai_client: AIClient,
+        context_builder: PatternContextBuilder | None = None,
+    ) -> None:
         self.db = db
         self.ai_client = ai_client
+        self.context_builder = context_builder
 
     def find_candidate_patterns(self, limit: int = 10) -> list[CandidatePattern]:
         rows = self.db.fetch_candidate_patterns(limit=limit)
@@ -97,6 +108,8 @@ class RoutineProposer:
                 if app_target_for(app) is not None
             },
         }
+        semantic_context = self._build_semantic_context_section(pattern)
+        context_block = f"\n\n{semantic_context}" if semantic_context else ""
         return (
             "You are a desktop automation routine designer for a local-first Windows agent.\n"
             "Your task is to convert one strong behavioral pattern into a safe routine proposal.\n"
@@ -123,6 +136,7 @@ class RoutineProposer:
             "}"
             "}\n"
             f"Pattern input:\n{json.dumps(payload, ensure_ascii=True, indent=2)}"
+            f"{context_block}"
         )
 
     def parse_ai_response(self, raw_response: str, pattern: CandidatePattern) -> RoutineProposalDecision:
@@ -234,6 +248,16 @@ class RoutineProposer:
 
     def _unsupported_apps(self, apps: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(app for app in apps if app_target_for(app) is None)
+
+    def _build_semantic_context_section(self, pattern: CandidatePattern) -> str:
+        if self.context_builder is None:
+            return ""
+        try:
+            enriched = self.context_builder.build_for_pattern(pattern)
+            return enriched.to_prompt_section()
+        except Exception as exc:
+            log.warning("Semantic context unavailable for pattern %s: %s", pattern.pattern_id, exc)
+            return ""
 
     def _load_json_object(self, raw_response: str) -> dict[str, Any]:
         text = raw_response.strip()

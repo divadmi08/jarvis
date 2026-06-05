@@ -180,6 +180,39 @@ class PatternEngineTestCase(unittest.TestCase):
         self.assertGreaterEqual(score, 0.0)
         conn.close()
 
+    def test_run_consolidates_memory_events_and_reflections(self) -> None:
+        self.engine.run()
+
+        memory_events = self.engine.db.fetch_memory_events(limit=10)
+        reflections = self.engine.db.fetch_reflections(limit=10)
+
+        self.assertTrue(memory_events)
+        self.assertTrue(reflections)
+        self.assertTrue(any(row[1] == "session" for row in memory_events))
+        self.assertTrue(any(row[1] == "pattern" for row in memory_events))
+
+    def test_llm_intent_fallback_runs_when_rules_are_uncertain(self) -> None:
+        class FakeLLMIntentRecognizer:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def infer(self, apps, context):
+                self.calls.append((apps, context))
+                return IntentInferenceEngine().infer(("chrome", "notion"), context)
+
+        recognizer = FakeLLMIntentRecognizer()
+        engine = PatternEngine(
+            db_path=self.db_path,
+            config=PatternEngineConfig(),
+            llm_intent_recognizer=recognizer,
+        )
+        context = TemporalContext("evening", True, 1, 0.5, "short", 20.0)
+
+        intent = engine._infer_intent(("unknown_app", "another_app"), context)
+
+        self.assertEqual(len(recognizer.calls), 1)
+        self.assertIsNotNone(intent)
+
 
 if __name__ == "__main__":
     unittest.main()
