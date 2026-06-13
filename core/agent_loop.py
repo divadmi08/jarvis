@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any, Protocol
 
+from core.app_registry import scan_installed_apps, format_apps_for_prompt
 from core.planner import LLMPlanner
 from core.task_state import AgentTaskResult, AgentTaskStatus
 from data.database import Database
@@ -80,17 +81,29 @@ class AgentLoop:
     def _retrieve_context(self, goal: str) -> str:
         goal_terms = {term for term in goal.lower().replace(",", " ").split() if len(term) >= 3}
         lines = []
+
         for row in self.db.fetch_memory_events(limit=10):
             summary = str(row[3])
             metadata = str(row[4] or "")
             haystack = f"{summary} {metadata}".lower()
             if not goal_terms or any(term in haystack for term in goal_terms):
                 lines.append(f"- Memory: {summary}")
+
         for row in self.db.fetch_reflections(limit=5):
             insight = str(row[2])
             if not goal_terms or any(term in insight.lower() for term in goal_terms):
                 lines.append(f"- Reflection: {insight}")
-        return "\n".join(lines[:8]) or "No relevant local context found."
+
+        memory_section = "\n".join(lines[:8]) or "No relevant local context found."
+
+        try:
+            apps = scan_installed_apps()
+            apps_section = format_apps_for_prompt(apps)
+        except Exception as exc:
+            log.warning("App registry scan failed: %s", exc)
+            apps_section = "No installed applications found."
+
+        return f"{memory_section}\n\n{apps_section}"
 
     def _observe_result(self, routine_result: Any) -> dict[str, Any]:
         steps = []

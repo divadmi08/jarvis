@@ -1,222 +1,152 @@
 from __future__ import annotations
 
+import json
 import os
-import shutil
-import glob
+import time
+from pathlib import Path
+from typing import Iterable
 
-from core.routine_proposal_types import ProposedRoutineStep
 
+CACHE_TTL_SECONDS = 24 * 60 * 60  # 1 giorno
+CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "app_registry_cache.json"
 
-# ── Registry con alias e candidati di ricerca ─────────────────────────────────
-# "exe_names": nomi dell'eseguibile da cercare nei path standard
-# "target": fallback se non trovato (comando nel PATH di sistema)
+# Cartelle in cui cercare eseguibili.
+SEARCH_ROOTS: list[str] = [
+    os.environ.get("LOCALAPPDATA", ""),
+    os.environ.get("APPDATA", ""),
+    os.environ.get("ProgramFiles", ""),
+    os.environ.get("ProgramFiles(x86)", ""),
+    os.environ.get("ProgramW6432", ""),
+    str(Path.home() / "Desktop"),
+    # Cartelle di sistema per app native Windows (explorer, notepad, ecc.)
+    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32"),
+    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "SysWOW64"),
+]
 
-APP_REGISTRY: dict[str, dict[str, object]] = {
-    "discord": {
-        "aliases": ["discord", "discord.exe"],
-        "exe_names": ["Discord.exe"],
-        "search_hints": [
-            r"%LOCALAPPDATA%\Discord",
-        ],
-        "target": "discord",
-    },
-    "opera": {
-        "aliases": ["opera", "opera.exe"],
-        "exe_names": ["opera.exe"],
-        "search_hints": [
-            r"%LOCALAPPDATA%\Programs\Opera",
-            r"%LOCALAPPDATA%\Programs\Opera GX",
-        ],
-        "target": "opera",
-    },
-    "visual studio code": {
-    "aliases": ["code", "code.exe", "vscode", "visual studio code"],
-    "exe_names": ["Code.exe"],
-    "search_hints": [
-        r"D:\vs_code\Microsoft VS Code",
-        r"%LOCALAPPDATA%\Programs\Microsoft VS Code",
-        r"%PROGRAMFILES%\Microsoft VS Code",
-    ],
-    "target": r"D:\vs_code\Microsoft VS Code\Code.exe",
-},
-    "chrome": {
-        "aliases": ["chrome", "chrome.exe", "google chrome"],
-        "exe_names": ["chrome.exe"],
-        "search_hints": [
-            r"%PROGRAMFILES%\Google\Chrome\Application",
-            r"%PROGRAMFILES(X86)%\Google\Chrome\Application",
-            r"%LOCALAPPDATA%\Google\Chrome\Application",
-        ],
-        "target": "chrome",
-    },
-    "brave": {
-        "aliases": ["brave", "brave.exe"],
-        "exe_names": ["brave.exe"],
-        "search_hints": [
-            r"%PROGRAMFILES%\BraveSoftware\Brave-Browser\Application",
-            r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application",
-        ],
-        "target": "brave",
-    },
-    "terminal": {
-        "aliases": ["terminal", "windows terminal", "wt", "powershell", "powershell.exe"],
-        "exe_names": ["wt.exe"],
-        "search_hints": [
-            r"%LOCALAPPDATA%\Microsoft\WindowsApps",
-        ],
-        "target": "wt",
-    },
-    "cursor": {
-        "aliases": ["cursor", "cursor.exe"],
-        "exe_names": ["Cursor.exe"],
-        "search_hints": [
-            r"%LOCALAPPDATA%\Programs\cursor",
-            r"%LOCALAPPDATA%\Programs\Cursor",
-        ],
-        "target": "cursor",
-    },
-    "docker": {
-        "aliases": ["docker", "docker desktop", "docker.exe"],
-        "exe_names": ["Docker Desktop.exe"],
-        "search_hints": [
-            r"%PROGRAMFILES%\Docker\Docker",
-        ],
-        "target": "docker",
-    },
-    "slack": {
-        "aliases": ["slack", "slack.exe"],
-        "exe_names": ["slack.exe"],
-        "search_hints": [
-            r"%LOCALAPPDATA%\slack",
-        ],
-        "target": "slack",
-    },
-    "notion": {
-        "aliases": ["notion", "notion.exe"],
-        "exe_names": ["Notion.exe"],
-        "search_hints": [
-            r"%LOCALAPPDATA%\Programs\Notion",
-        ],
-        "target": "notion",
-    },
+# Cartelle che vogliamo scansionare solo superficialmente (depth 1)
+# per evitare scan lenti su alberi enormi come System32.
+MAX_DEPTH = 4  # profondità massima per i root standard
+
+# Cartelle scansionate solo superficialmente (depth 1) per evitare
+# scan lenti su alberi enormi come System32.
+SHALLOW_ROOTS: set[str] = {
+    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32"),
+    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "SysWOW64"),
+}
+
+# Cartelle da escludere per non perdere tempo / evitare rumore.
+EXCLUDE_DIR_NAMES = {
+    "node_modules", "__pycache__", ".git", "Windows",
+    "WindowsApps", "Temp", "Cache", "Crashpad", "logs",
 }
 
 
-# ── Auto-discovery ─────────────────────────────────────────────────────────────
-
-def _expand(path: str) -> str:
-    """Espande le variabili d'ambiente Windows nel path (es. %LOCALAPPDATA%)."""
-    return os.path.expandvars(path)
+def _is_excluded(dirname: str) -> bool:
+    return dirname in EXCLUDE_DIR_NAMES or dirname.startswith(".")
 
 
-def _find_exe(exe_names: list[str], search_hints: list[str]) -> str | None:
-    """
-    Cerca un eseguibile in questo ordine:
-    1. Path hints specifici dell'app (più veloce e preciso)
-    2. Cartelle standard di Windows (%PROGRAMFILES%, %LOCALAPPDATA%, ecc.)
-    3. PATH di sistema tramite shutil.which
-    """
-    # 1. Controlla gli hints specifici
-    for hint in search_hints:
-        expanded = _expand(hint)
-        for exe_name in exe_names:
-            full_path = os.path.join(expanded, exe_name)
-            if os.path.isfile(full_path):
-                return full_path
+def _iter_exe_files(root: str, max_depth: int) -> Iterable[Path]:
+    root_path = Path(root)
+    if not root_path.exists():
+        return
 
-    # 2. Cerca nelle cartelle standard di Windows
-    standard_roots = [
-        _expand(r"%PROGRAMFILES%"),
-        _expand(r"%PROGRAMFILES(X86)%"),
-        _expand(r"%LOCALAPPDATA%\Programs"),
-        _expand(r"%LOCALAPPDATA%"),
-        _expand(r"%APPDATA%"),
-    ]
-    for root in standard_roots:
-        if not os.path.isdir(root):
+    root_depth = len(root_path.parts)
+    for current_root, dirnames, filenames in os.walk(root_path):
+        depth = len(Path(current_root).parts) - root_depth
+        if depth >= max_depth:
+            dirnames[:] = []
             continue
-        for exe_name in exe_names:
-            # Cerca ricorsivamente (max 3 livelli per non essere lento)
-            pattern = os.path.join(root, "**", exe_name)
-            matches = glob.glob(pattern, recursive=True)
-            # Filtra path che contengono "Uninstall" o "temp"
-            matches = [
-                m for m in matches
-                if not any(x in m.lower() for x in ("uninstall", "temp", "cache", "crash"))
-            ]
-            if matches:
-                return matches[0]
 
-    # 3. Fallback: PATH di sistema
-    for exe_name in exe_names:
-        found = shutil.which(exe_name)
-        if found:
-            return found
+        dirnames[:] = [d for d in dirnames if not _is_excluded(d)]
+
+        for filename in filenames:
+            if filename.lower().endswith(".exe"):
+                yield Path(current_root) / filename
+
+
+def scan_installed_apps(force: bool = False) -> dict[str, str]:
+    """
+    Scansiona il filesystem per trovare eseguibili (.exe) installati.
+
+    Ritorna un dizionario {nome_app_lowercase: path_assoluto}.
+    Usa una cache su disco con TTL di 1 giorno per evitare scan ripetuti
+    (la scansione completa può richiedere diversi secondi/minuti).
+    """
+    if not force and CACHE_FILE.exists():
+        age = time.time() - CACHE_FILE.stat().st_mtime
+        if age < CACHE_TTL_SECONDS:
+            try:
+                with open(CACHE_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass  # cache corrotta, ri-scansiona
+
+    apps: dict[str, str] = {}
+    for root in SEARCH_ROOTS:
+        if not root:
+            continue
+        depth = 1 if root in SHALLOW_ROOTS else MAX_DEPTH
+        for exe_path in _iter_exe_files(root, depth):
+            name = exe_path.stem.lower()
+            existing = apps.get(name)
+            # Preferisci path più corti (di solito sono l'eseguibile principale,
+            # non file dentro sottocartelle versionate/cache).
+            if existing is None or len(str(exe_path)) < len(existing):
+                apps[name] = str(exe_path)
+
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(apps, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+    return apps
+
+
+def find_app(name: str, apps: dict[str, str] | None = None) -> str | None:
+    """
+    Cerca un'app per nome (case-insensitive, match parziale).
+    Ritorna il path assoluto del primo match o None.
+    """
+    apps = apps if apps is not None else scan_installed_apps()
+    needle = name.strip().lower()
+
+    if not needle:
+        return None
+
+    if needle in apps:
+        return apps[needle]
+
+    # Match parziale: richiede almeno 3 caratteri per evitare falsi positivi
+    # (es. una needle vuota o di 1-2 caratteri che "matcherebbe" quasi tutto
+    # tramite l'operatore `in`).
+    if len(needle) < 3:
+        return None
+
+    for app_name, path in apps.items():
+        if len(app_name) < 3:
+            continue
+        if needle in app_name or app_name in needle:
+            return path
 
     return None
 
 
-# Cache dei target risolti (calcolata una volta sola al primo uso)
-_resolved_cache: dict[str, str | None] = {}
-
-
-def _resolve_target(canonical_name: str) -> str | None:
+def format_apps_for_prompt(apps: dict[str, str], limit: int = 60) -> str:
     """
-    Risolve il target reale per un'app: prima prova auto-discovery,
-    poi usa il target di fallback dal registry.
+    Formatta la lista app in modo compatto per inserirla nel context del planner.
+    Limita il numero di righe per non gonfiare troppo il prompt.
     """
-    if canonical_name in _resolved_cache:
-        return _resolved_cache[canonical_name]
+    if not apps:
+        return "No installed applications found."
 
-    config = APP_REGISTRY[canonical_name]
-    exe_names = config.get("exe_names", [])
-    search_hints = config.get("search_hints", [])
-
-    # Prova auto-discovery
-    found = _find_exe(exe_names, search_hints) if exe_names else None
-
-    # Fallback al target manuale
-    result = found or config.get("target") or None
-    if isinstance(result, str):
-        result = result.strip() or None
-
-    _resolved_cache[canonical_name] = result
-    return result
+    lines = [f"{name} -> {path}" for name, path in list(apps.items())[:limit]]
+    return "Installed applications (name -> path):\n" + "\n".join(lines)
 
 
-# ── Lookup ────────────────────────────────────────────────────────────────────
-
-def _normalize_lookup_token(name: str) -> str:
-    normalized = name.strip().lower().replace("\\", "/")
-    if not normalized:
-        return ""
-    basename = os.path.basename(normalized)
-    if basename.endswith(".exe"):
-        basename = basename[:-4]
-    return basename.strip()
-
-
-def normalize_app_name(name: str) -> str | None:
-    lookup = _normalize_lookup_token(name)
-    if not lookup:
-        return None
-    for canonical_name, config in APP_REGISTRY.items():
-        aliases = config.get("aliases", [])
-        candidates = (canonical_name, *[str(alias) for alias in aliases])
-        if any(_normalize_lookup_token(candidate) == lookup for candidate in candidates):
-            return canonical_name
-    return None
-
-
-def app_target_for(name: str) -> str | None:
-    canonical_name = normalize_app_name(name)
-    if canonical_name is None:
-        return None
-    return _resolve_target(canonical_name)
-
-
-def proposal_step_from_app(app_name: str, action: str = "open_app") -> ProposedRoutineStep | None:
-    target = app_target_for(app_name)
-    if target is None:
-        return None
-    return ProposedRoutineStep(action=action, target=target)
+if __name__ == "__main__":
+    found = scan_installed_apps(force=True)
+    print(f"Trovate {len(found)} app.")
+    for app_name, app_path in sorted(found.items()):
+        print(f"  {app_name:<30} {app_path}")
