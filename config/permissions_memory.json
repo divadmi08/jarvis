@@ -1,0 +1,15 @@
+{
+  "run_command::control.exe": true,
+  "close_app::discord": true,
+  "open_url::https://www.youtube.com": true,
+  "open_url::https://www.google.com/search?q=ricette+pizza": true,
+  "open_url::https://www.pornhub.com": true,
+  "open_url::https://www.instagram.com": true,
+  "open_url::https://www.pornhub.com/categories/teen": true,
+  "open_url::https://www.youtube.com/@fierikvod": true,
+  "open_url::https://www.instagram.com/dodo": true,
+  "open_url::https://www.instagram.com/dodolacapidue": true,
+  "open_url::https://github.com/trending?since=weekly": true,
+  "open_url::https://chat.openai.com": true,
+  "open_url::https://www.google.com/search?q=meteo+oggi+comun+nuovo": true
+}

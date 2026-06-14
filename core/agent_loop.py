@@ -4,7 +4,8 @@ import json
 import logging
 from typing import Any, Protocol
 
-from core.app_registry import scan_installed_apps, format_apps_for_prompt
+from core.app_registry import load_aliases
+from core.memory import get_memory
 from core.planner import LLMPlanner
 from core.task_state import AgentTaskResult, AgentTaskStatus
 from data.database import Database
@@ -61,6 +62,11 @@ class AgentLoop:
                 status.value,
                 result_json=json.dumps(observation, ensure_ascii=True),
             )
+
+            # Salva in memoria semantica se il task è andato a buon fine
+            if status in (AgentTaskStatus.COMPLETED, AgentTaskStatus.PARTIAL):
+                self._save_to_memory(task_id, goal, step, observation)
+
             return AgentTaskResult(
                 task_id=task_id,
                 status=status,
@@ -78,32 +84,48 @@ class AgentLoop:
             log.exception("Agent task %s failed", task_id)
             return AgentTaskResult(task_id, AgentTaskStatus.FAILED, executed_step=step, observation=observation, message=str(exc))
 
+    def _save_to_memory(
+        self,
+        task_id: int,
+        goal: str,
+        step: Any,
+        observation: dict[str, Any],
+    ) -> None:
+        """Salva il task completato nella memoria semantica ChromaDB."""
+        try:
+            memory = get_memory()
+            memory.save_task(
+                task_id=task_id,
+                goal=goal,
+                action=getattr(step, "action", ""),
+                target=getattr(step, "target", ""),
+                status=observation.get("routine_status", "unknown"),
+            )
+        except Exception as e:
+            log.warning(f"Failed to save task to semantic memory: {e}")
+
     def _retrieve_context(self, goal: str) -> str:
-        goal_terms = {term for term in goal.lower().replace(",", " ").split() if len(term) >= 3}
         lines = []
 
-        for row in self.db.fetch_memory_events(limit=10):
-            summary = str(row[3])
-            metadata = str(row[4] or "")
-            haystack = f"{summary} {metadata}".lower()
-            if not goal_terms or any(term in haystack for term in goal_terms):
-                lines.append(f"- Memory: {summary}")
-
-        for row in self.db.fetch_reflections(limit=5):
-            insight = str(row[2])
-            if not goal_terms or any(term in insight.lower() for term in goal_terms):
-                lines.append(f"- Reflection: {insight}")
-
-        memory_section = "\n".join(lines[:8]) or "No relevant local context found."
-
+        # 1. Memoria semantica — cerca per similarità al goal corrente
         try:
-            apps = scan_installed_apps()
-            apps_section = format_apps_for_prompt(apps)
-        except Exception as exc:
-            log.warning("App registry scan failed: %s", exc)
-            apps_section = "No installed applications found."
+            memory = get_memory()
+            semantic_context = memory.format_for_prompt(goal, n_results=4)
+            if semantic_context:
+                lines.append(semantic_context)
+        except Exception as e:
+            log.warning(f"Semantic memory retrieval failed: {e}")
 
-        return f"{memory_section}\n\n{apps_section}"
+        # 2. Alias manuali — mostrati per primi così il modello li usa
+        try:
+            aliases = load_aliases()
+            if aliases:
+                alias_lines = [f"{name} -> {path}" for name, path in aliases.items()]
+                lines.append("Manual app aliases (use these exact paths when matching):\n" + "\n".join(alias_lines))
+        except Exception as e:
+            log.warning(f"App aliases load failed: {e}")
+
+        return "\n\n".join(lines) if lines else "No relevant context found."
 
     def _observe_result(self, routine_result: Any) -> dict[str, Any]:
         steps = []
@@ -134,5 +156,4 @@ class AgentLoop:
 
     def _build_default_executor(self) -> RoutineExecutor:
         from core.executor import Executor
-
         return Executor()

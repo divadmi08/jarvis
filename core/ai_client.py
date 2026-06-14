@@ -10,8 +10,7 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 FALLBACK_GEMINI_MODEL = "gemini-2.5-flash"
 
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-FALLBACK_GROQ_MODEL = "llama3-8b-8192"
-
+FALLBACK_GROQ_MODEL = "llama-3.1-8b-instant"
 JARVIS_USER_AGENT = "Jarvis"
 
 
@@ -236,10 +235,10 @@ def build_ai_client(provider: str | None = None, model: str | None = None) -> AI
       3. Errore
     """
     if provider is None:
-        if os.getenv("GROQ_API_KEY"):
-            provider = "groq"
-        elif os.getenv("GEMINI_API_KEY"):
+        if os.getenv("GEMINI_API_KEY"):
             provider = "gemini"
+        elif os.getenv("GROQ_API_KEY"):
+            provider = "groq"
         else:
             raise AIClientConfigurationError(
                 "Nessuna API key trovata. Imposta GROQ_API_KEY o GEMINI_API_KEY nel file .env"

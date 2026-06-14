@@ -1,0 +1,14 @@
+{
+  "_comment": "Configurazione generale di Jarvis",
+  "default_browser": "C:\\Users\\Amministratore\\AppData\\Local\\Programs\\Opera\\opera.exe",
+  "default_search_engine": "https://www.google.com/search?q=",
+  "auto_approve_actions": [
+    "close_app:discord",
+    "close_app:spotify",
+    "close_app:steam",
+    "close_app:opera",
+    "close_app:chrome",
+    "close_app:brave",
+    "open_url"
+  ]
+}

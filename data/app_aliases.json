@@ -1,0 +1,29 @@
+{
+  "_comment": "Alias manuali per app e URL. Aggiungi qui path personalizzati o URL diretti.",
+
+  "spotify": "C:\\Users\\Amministratore\\AppData\\Roaming\\Spotify\\Spotify.exe",
+  "discord": "C:\\Users\\Amministratore\\AppData\\Local\\Discord\\app-1.0.9241\\Discord.exe",
+  "valorant": "C:\\Riot Games\\Riot Client\\RiotClientServices.exe",
+  "riot game": "C:\\Riot Games\\Riot Client\\RiotClientServices.exe",
+  "riot games": "C:\\Riot Games\\Riot Client\\RiotClientServices.exe",
+  "armoury crate": "C:\\Program Files\\ASUS\\Armoury Crate Service\\ArmouryCrate.UserSessionHelper.exe",
+  "armoury": "C:\\Program Files\\ASUS\\Armoury Crate Service\\ArmouryCrate.UserSessionHelper.exe",
+  "impostazioni": "ms-settings:",
+  "settings": "ms-settings:",
+  "microsoft store": "ms-windows-store:",
+  "windows store": "ms-windows-store:",
+  "store": "ms-windows-store:",
+  "rocket league": "C:\\fn\\Epic Games\\Launcher\\Portal\\Binaries\\Win32\\EpicGamesLauncher.exe",
+  "minecraft launcher": "C:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe",
+
+  "_comment_urls": "URL diretti — aperti nel browser di sistema",
+  "youtube": "https://www.youtube.com",
+  "youtube music": "https://music.youtube.com",
+  "gmail": "https://mail.google.com",
+  "google": "https://www.google.com",
+  "github": "https://www.github.com",
+  "twitch": "https://www.twitch.tv",
+  "netflix": "https://www.netflix.com",
+  "chatgpt": "https://chat.openai.com",
+  "claude": "https://claude.ai"
+}

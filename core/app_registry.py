@@ -3,74 +3,161 @@ from __future__ import annotations
 import json
 import os
 import time
+import winreg
 from pathlib import Path
-from typing import Iterable
 
 
-CACHE_TTL_SECONDS = 24 * 60 * 60  # 1 giorno
+CACHE_TTL_SECONDS = 24 * 60 * 60
 CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "app_registry_cache.json"
 
-# Cartelle in cui cercare eseguibili.
-SEARCH_ROOTS: list[str] = [
-    os.environ.get("LOCALAPPDATA", ""),
-    os.environ.get("APPDATA", ""),
-    os.environ.get("ProgramFiles", ""),
-    os.environ.get("ProgramFiles(x86)", ""),
-    os.environ.get("ProgramW6432", ""),
-    str(Path.home() / "Desktop"),
-    # Cartelle di sistema per app native Windows (explorer, notepad, ecc.)
-    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32"),
-    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "SysWOW64"),
+REGISTRY_KEYS = [
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_CURRENT_USER,  r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
 ]
 
-# Cartelle che vogliamo scansionare solo superficialmente (depth 1)
-# per evitare scan lenti su alberi enormi come System32.
-MAX_DEPTH = 4  # profondità massima per i root standard
+START_MENU_ROOTS = [
+    Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+    Path(os.environ.get("ProgramData", "C:\\ProgramData")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+]
 
-# Cartelle scansionate solo superficialmente (depth 1) per evitare
-# scan lenti su alberi enormi come System32.
-SHALLOW_ROOTS: set[str] = {
-    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32"),
-    str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "SysWOW64"),
-}
-
-# Cartelle da escludere per non perdere tempo / evitare rumore.
-EXCLUDE_DIR_NAMES = {
-    "node_modules", "__pycache__", ".git", "Windows",
-    "WindowsApps", "Temp", "Cache", "Crashpad", "logs",
+# Nomi di exe da scartare come path principale (uninstaller, updater, helper)
+_BAD_EXE_STEMS = {
+    "uninstall", "unins000", "uninst", "uninstaller",
+    "update", "updater", "setup", "install", "installer",
+    "crashhandler", "crashreporter", "crashpad_handler",
+    "squirrel",
 }
 
 
-def _is_excluded(dirname: str) -> bool:
-    return dirname in EXCLUDE_DIR_NAMES or dirname.startswith(".")
+def _is_bad_exe(path: str) -> bool:
+    stem = Path(path).stem.lower()
+    return any(bad in stem for bad in _BAD_EXE_STEMS)
 
 
-def _iter_exe_files(root: str, max_depth: int) -> Iterable[Path]:
-    root_path = Path(root)
-    if not root_path.exists():
-        return
+def _best_exe_in_dir(location: str, name_hint: str) -> str | None:
+    """Cerca il miglior exe in una cartella data un hint sul nome."""
+    try:
+        loc = Path(location)
+        if not loc.is_dir():
+            return None
+        candidates = [f for f in loc.iterdir() if f.suffix.lower() == ".exe" and not _is_bad_exe(str(f))]
+        if not candidates:
+            return None
+        # Preferisci exe il cui nome contiene l'hint
+        hint = name_hint.lower().split()[0]
+        for c in candidates:
+            if hint in c.stem.lower():
+                return str(c)
+        # Fallback: il più corto (di solito il main exe)
+        return str(min(candidates, key=lambda f: len(f.stem)))
+    except OSError:
+        return None
 
-    root_depth = len(root_path.parts)
-    for current_root, dirnames, filenames in os.walk(root_path):
-        depth = len(Path(current_root).parts) - root_depth
-        if depth >= max_depth:
-            dirnames[:] = []
+
+def _read_registry_apps() -> dict[str, str]:
+    apps: dict[str, str] = {}
+
+    for hive, subkey in REGISTRY_KEYS:
+        try:
+            key = winreg.OpenKey(hive, subkey)
+        except OSError:
             continue
 
-        dirnames[:] = [d for d in dirnames if not _is_excluded(d)]
+        i = 0
+        while True:
+            try:
+                subkey_name = winreg.EnumKey(key, i)
+                i += 1
+            except OSError:
+                break
 
-        for filename in filenames:
-            if filename.lower().endswith(".exe"):
-                yield Path(current_root) / filename
+            try:
+                app_key = winreg.OpenKey(key, subkey_name)
+            except OSError:
+                continue
+
+            try:
+                display_name, _ = winreg.QueryValueEx(app_key, "DisplayName")
+                display_name = str(display_name).strip()
+                if not display_name:
+                    continue
+
+                exe_path = None
+
+                # 1. DisplayIcon → spesso punta all'exe principale
+                try:
+                    icon, _ = winreg.QueryValueEx(app_key, "DisplayIcon")
+                    icon = str(icon).split(",")[0].strip().strip('"')
+                    if (icon.lower().endswith(".exe")
+                            and os.path.exists(icon)
+                            and not _is_bad_exe(icon)):
+                        exe_path = icon
+                except OSError:
+                    pass
+
+                # 2. InstallLocation → cerca l'exe con hint
+                if not exe_path:
+                    try:
+                        location, _ = winreg.QueryValueEx(app_key, "InstallLocation")
+                        location = str(location).strip().strip('"')
+                        if location:
+                            exe_path = _best_exe_in_dir(location, display_name)
+                    except OSError:
+                        pass
+
+                if exe_path and os.path.exists(exe_path):
+                    key_name = display_name.lower()
+                    if key_name not in apps or len(exe_path) < len(apps[key_name]):
+                        apps[key_name] = exe_path
+
+            except OSError:
+                pass
+            finally:
+                try:
+                    winreg.CloseKey(app_key)
+                except Exception:
+                    pass
+
+        winreg.CloseKey(key)
+
+    return apps
+
+
+def _read_startmenu_apps() -> dict[str, str]:
+    apps: dict[str, str] = {}
+    try:
+        import win32com.client  # type: ignore
+        shell = win32com.client.Dispatch("WScript.Shell")
+    except Exception:
+        return apps
+
+    for root in START_MENU_ROOTS:
+        if not root.exists():
+            continue
+        for lnk in root.rglob("*.lnk"):
+            try:
+                shortcut = shell.CreateShortCut(str(lnk))
+                target = shortcut.Targetpath
+                if (target
+                        and target.lower().endswith(".exe")
+                        and os.path.exists(target)
+                        and not _is_bad_exe(target)):
+                    name = lnk.stem.lower()
+                    if name not in apps or len(target) < len(apps[name]):
+                        apps[name] = target
+            except Exception:
+                continue
+
+    return apps
 
 
 def scan_installed_apps(force: bool = False) -> dict[str, str]:
     """
-    Scansiona il filesystem per trovare eseguibili (.exe) installati.
-
-    Ritorna un dizionario {nome_app_lowercase: path_assoluto}.
-    Usa una cache su disco con TTL di 1 giorno per evitare scan ripetuti
-    (la scansione completa può richiedere diversi secondi/minuti).
+    Costruisce il registry delle app installate da:
+    1. Windows Registry (fonte primaria)
+    2. Menu Start shortcuts .lnk (fonte supplementare)
+    Cache su disco per 24h.
     """
     if not force and CACHE_FILE.exists():
         age = time.time() - CACHE_FILE.stat().st_mtime
@@ -79,20 +166,13 @@ def scan_installed_apps(force: bool = False) -> dict[str, str]:
                 with open(CACHE_FILE, encoding="utf-8") as f:
                     return json.load(f)
             except (json.JSONDecodeError, OSError):
-                pass  # cache corrotta, ri-scansiona
+                pass
 
-    apps: dict[str, str] = {}
-    for root in SEARCH_ROOTS:
-        if not root:
-            continue
-        depth = 1 if root in SHALLOW_ROOTS else MAX_DEPTH
-        for exe_path in _iter_exe_files(root, depth):
-            name = exe_path.stem.lower()
-            existing = apps.get(name)
-            # Preferisci path più corti (di solito sono l'eseguibile principale,
-            # non file dentro sottocartelle versionate/cache).
-            if existing is None or len(str(exe_path)) < len(existing):
-                apps[name] = str(exe_path)
+    apps = _read_registry_apps()
+
+    for name, path in _read_startmenu_apps().items():
+        if name not in apps:
+            apps[name] = path
 
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -106,8 +186,10 @@ def scan_installed_apps(force: bool = False) -> dict[str, str]:
 
 def find_app(name: str, apps: dict[str, str] | None = None) -> str | None:
     """
-    Cerca un'app per nome (case-insensitive, match parziale).
-    Ritorna il path assoluto del primo match o None.
+    Cerca un'app per nome (case-insensitive).
+    1. Match esatto
+    2. needle contenuto nel nome display (es. "steam" trova "steam")
+    3. nome display contenuto nel needle (es. "obs" trovato in "obs studio")
     """
     apps = apps if apps is not None else scan_installed_apps()
     needle = name.strip().lower()
@@ -118,35 +200,42 @@ def find_app(name: str, apps: dict[str, str] | None = None) -> str | None:
     if needle in apps:
         return apps[needle]
 
-    # Match parziale: richiede almeno 3 caratteri per evitare falsi positivi
-    # (es. una needle vuota o di 1-2 caratteri che "matcherebbe" quasi tutto
-    # tramite l'operatore `in`).
-    if len(needle) < 3:
+    if len(needle) < 4:
         return None
 
     for app_name, path in apps.items():
-        if len(app_name) < 3:
-            continue
-        if needle in app_name or app_name in needle:
+        if needle in app_name:
+            return path
+
+    for app_name, path in apps.items():
+        if len(app_name) >= 4 and app_name in needle:
             return path
 
     return None
 
 
-def format_apps_for_prompt(apps: dict[str, str], limit: int = 60) -> str:
-    """
-    Formatta la lista app in modo compatto per inserirla nel context del planner.
-    Limita il numero di righe per non gonfiare troppo il prompt.
-    """
+def format_apps_for_prompt(apps: dict[str, str], limit: int = 100) -> str:
     if not apps:
         return "No installed applications found."
-
     lines = [f"{name} -> {path}" for name, path in list(apps.items())[:limit]]
-    return "Installed applications (name -> path):\n" + "\n".join(lines)
+    return "Installed applications (display name -> exe path):\n" + "\n".join(lines)
 
 
 if __name__ == "__main__":
     found = scan_installed_apps(force=True)
     print(f"Trovate {len(found)} app.")
     for app_name, app_path in sorted(found.items()):
-        print(f"  {app_name:<30} {app_path}")
+        print(f"  {app_name:<40} {app_path}")
+
+
+ALIASES_FILE = Path(__file__).resolve().parent.parent / "data" / "app_aliases.json"
+
+
+def load_aliases() -> dict[str, str]:
+    """Carica alias manuali da data/app_aliases.json."""
+    try:
+        with open(ALIASES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {k.lower(): v for k, v in data.items() if not k.startswith("_")}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
